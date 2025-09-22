@@ -1,0 +1,15 @@
+streamlit
+requests
+pandas
+sentence-transformers
+transformers
+openai
+torch
+scikit-learn
+rapidfuzz
+numpy
+openpyxl
+semhash
+spacy
+pl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_sm-3.8.0/pl_core_news_sm-3.8.0.tar.gz
+
