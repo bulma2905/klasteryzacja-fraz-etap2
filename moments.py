@@ -86,6 +86,9 @@ def get_embeddings(texts, client, model="text-embedding-3-large"):
 # Logika główna
 # -------------------------------------
 if uploaded_file and OPENAI_API_KEY:
+    progress = st.progress(0)
+    status = st.empty()
+
     df = pd.read_excel(uploaded_file)
     st.subheader("📊 Podgląd danych wejściowych")
     st.dataframe(df.head())
@@ -95,24 +98,26 @@ if uploaded_file and OPENAI_API_KEY:
     titles = df["tytul"].astype(str).tolist()
     n = len(df)
 
-    # Tworzymy krawędzie grafu zależnie od metody
-    edges = []
-
+    # --- krok 1: budowanie grafu ---
+    status.text("🔍 Obliczanie podobieństwa...")
     if method == "RapidFuzz":
+        edges = []
         for i in range(n):
             for j in range(i + 1, n):
                 sim = fuzz.ratio(titles[i], titles[j])
                 if sim >= threshold:
                     edges.append((i, j))
+        progress.progress(20)
     else:  # Embeddingi
         embeddings = get_embeddings(titles, client, "text-embedding-3-large")
+        progress.progress(20)
+        status.text("🧠 Liczenie macierzy podobieństw (embeddingi)...")
         sim_matrix = cosine_similarity(embeddings)
-        for i in range(n):
-            for j in range(i + 1, n):
-                if sim_matrix[i, j] >= threshold:
-                    edges.append((i, j))
+        edges = [(i, j) for i in range(n) for j in range(i+1, n) if sim_matrix[i, j] >= threshold]
+        progress.progress(40)
 
-    # Grupowanie (DFS na grafie)
+    # --- krok 2: grupowanie ---
+    status.text("📦 Grupowanie podobnych fraz...")
     groups, visited = [], set()
 
     def dfs(node, group):
@@ -128,19 +133,21 @@ if uploaded_file and OPENAI_API_KEY:
         if i not in visited:
             group = []
             dfs(i, group)
-            if len(group) > 1:  # tylko grupy >1
+            if len(group) > 1:
                 groups.append(group)
+    progress.progress(60)
 
+    # --- krok 3: generowanie briefów ---
     results = []
     grouped_indices = set()
 
-    # Briefy dla scalonych grup
+    status.text("📝 Generowanie briefów dla scalonych grup...")
     for gid, group in enumerate(groups, 1):
         cluster_ids = [df.loc[i, "cluster_id"] for i in group]
         frazy = []
         for i in group:
             frazy.extend(str(df.loc[i, "frazy"]).split(", "))
-        frazy = list(set(frazy))  # unikalne frazy
+        frazy = list(set(frazy))
 
         brief = generate_brief(", ".join(frazy), client, OPENAI_CHAT_MODEL)
 
@@ -154,31 +161,32 @@ if uploaded_file and OPENAI_API_KEY:
             "tytul": brief["tytul"],
             "wytyczne": brief["wytyczne"]
         })
-
         grouped_indices.update(group)
+    progress.progress(80)
 
-    # Briefy dla niescalonych (pojedynczych) klastrów
+    # --- krok 4: dodawanie niescalonych (bez ponownego generowania) ---
+    status.text("📑 Dodawanie briefów dla niescalonych klastrów...")
     leftovers = set(range(n)) - grouped_indices
     for i in leftovers:
-        frazy = str(df.loc[i, "frazy"])
-        brief = generate_brief(frazy, client, OPENAI_CHAT_MODEL)
         results.append({
             "status": "pojedynczy",
             "group_id": "",
             "cluster_ids": str(df.loc[i, "cluster_id"]),
             "main_phrase": df.loc[i, "main_phrase"],
-            "intencja": brief["intencja"],
-            "frazy": brief["frazy"],
-            "tytul": brief["tytul"],
-            "wytyczne": brief["wytyczne"]
+            "intencja": df.loc[i, "intencja"],   # z pliku wejściowego
+            "frazy": df.loc[i, "frazy"],
+            "tytul": df.loc[i, "tytul"],         # z pliku wejściowego
+            "wytyczne": df.loc[i, "wytyczne"]    # z pliku wejściowego
         })
+    progress.progress(95)
 
+    # --- krok 5: export ---
     if results:
-        st.subheader("📑 Kompletny plan artykułów (scalone + niescalone)")
+        status.text("💾 Tworzenie raportu końcowego...")
         results_df = pd.DataFrame(results)
+        st.subheader("📑 Kompletny plan artykułów (scalone + niescalone)")
         st.dataframe(results_df)
 
-        # Eksport do Excela
         xlsx_buffer = io.BytesIO()
         with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
             results_df.to_excel(writer, sheet_name="Briefy", index=False)
@@ -190,6 +198,9 @@ if uploaded_file and OPENAI_API_KEY:
             file_name="briefy_pelne.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+        status.text("✅ Zakończono!")
+        progress.progress(100)
     else:
         st.success("✅ Nie znaleziono żadnych wyników.")
+
 
