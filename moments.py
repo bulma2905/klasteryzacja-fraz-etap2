@@ -6,6 +6,10 @@ from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 from rapidfuzz import fuzz
 
+# ✅ DODANE: normalizacja
+import re
+import unidecode
+
 # -------------------------------------
 # Konfiguracja strony
 # -------------------------------------
@@ -30,6 +34,32 @@ else:
 
 # Upload pliku
 uploaded_file = st.file_uploader("Wgraj plik frazy_briefy.xlsx", type=["xlsx"])
+
+
+# -------------------------------------
+# ✅ DODANE: normalizacja + dedup listy
+# -------------------------------------
+def normalize(s: str) -> str:
+    s = str(s).lower().strip()
+    s = unidecode.unidecode(s)
+    s = re.sub(r"[^a-z0-9\s]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def dedup_list_keep_pretty(items):
+    seen = set()
+    out = []
+    for x in items:
+        nx = normalize(x)
+        if nx and nx not in seen:
+            out.append(str(x).strip())
+            seen.add(nx)
+    return out
+
+def pick_main_phrase_from_group(df, group):
+    candidates = [str(df.loc[i, "main_phrase"]) for i in group]
+    candidates = [c for c in candidates if c and c != "nan"]
+    return sorted(candidates, key=lambda x: (len(normalize(x)), len(x)))[0] if candidates else ""
 
 
 # -------------------------------------
@@ -95,7 +125,16 @@ if uploaded_file and OPENAI_API_KEY:
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    titles = df["tytul"].astype(str).tolist()
+    # ✅ ZMIENIONE: budujemy pole porównawcze na main_phrase + intencja + tytul
+    df["cmp"] = (
+        df["main_phrase"].astype(str).apply(normalize)
+        + " | "
+        + df["intencja"].astype(str).apply(normalize)
+        + " | "
+        + df["tytul"].astype(str).apply(normalize)
+    )
+
+    texts = df["cmp"].astype(str).tolist()
     n = len(df)
 
     # --- krok 1: budowanie grafu ---
@@ -104,12 +143,14 @@ if uploaded_file and OPENAI_API_KEY:
         edges = []
         for i in range(n):
             for j in range(i + 1, n):
-                sim = fuzz.ratio(titles[i], titles[j])
+                # ✅ ZMIENIONE: token_set_ratio zamiast ratio
+                sim = fuzz.token_set_ratio(texts[i], texts[j])
                 if sim >= threshold:
                     edges.append((i, j))
         progress.progress(20)
     else:  # Embeddingi
-        embeddings = get_embeddings(titles, client, "text-embedding-3-large")
+        # ✅ ZMIENIONE: embeddingi liczone na "cmp", nie na samych tytułach
+        embeddings = get_embeddings(texts, client, "text-embedding-3-large")
         progress.progress(20)
         status.text("🧠 Liczenie macierzy podobieństw (embeddingi)...")
         sim_matrix = cosine_similarity(embeddings)
@@ -146,8 +187,9 @@ if uploaded_file and OPENAI_API_KEY:
         cluster_ids = [df.loc[i, "cluster_id"] for i in group]
         frazy = []
         for i in group:
-            frazy.extend(str(df.loc[i, "frazy"]).split(", "))
-        frazy = list(set(frazy))
+            # ✅ ZMIENIONE: split bardziej odporny + normalizacja dedupu
+            frazy.extend([p.strip() for p in str(df.loc[i, "frazy"]).split(",") if p.strip()])
+        frazy = dedup_list_keep_pretty(frazy)
 
         brief = generate_brief(", ".join(frazy), client, OPENAI_CHAT_MODEL)
 
@@ -155,7 +197,8 @@ if uploaded_file and OPENAI_API_KEY:
             "status": "scalone",
             "group_id": gid,
             "cluster_ids": ", ".join(map(str, cluster_ids)),
-            "main_phrase": df.loc[group[0], "main_phrase"],
+            # ✅ ZMIENIONE: main_phrase wybieramy stabilnie z grupy
+            "main_phrase": pick_main_phrase_from_group(df, group),
             "intencja": brief["intencja"],
             "frazy": brief["frazy"],
             "tytul": brief["tytul"],
@@ -202,5 +245,6 @@ if uploaded_file and OPENAI_API_KEY:
         progress.progress(100)
     else:
         st.success("✅ Nie znaleziono żadnych wyników.")
+
 
 
